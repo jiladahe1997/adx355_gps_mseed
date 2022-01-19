@@ -95,18 +95,18 @@
 // </c>
 // <c1>Using MailBox
 //  <i>Using MailBox
-#define RT_USING_MAILBOX
+//#define RT_USING_MAILBOX
 // </c>
 // <c1>Using Message Queue
 //  <i>Using Message Queue
-//#define RT_USING_MESSAGEQUEUE
+#define RT_USING_MESSAGEQUEUE
 // </c>
 // </h>
 
 // <h>Memory Management Configuration
 // <c1>Dynamic Heap Management
 //  <i>Dynamic Heap Management
-//#define RT_USING_HEAP
+#define RT_USING_HEAP
 // </c>
 // <c1>using small memory
 //  <i>using small memory
@@ -128,7 +128,7 @@
 //  <i>Default: 128  (128Byte)
 #define RT_CONSOLEBUF_SIZE          128
 // </h>
-
+#define RT_USING_FINSH
 #if defined(RT_USING_FINSH)
     #define FINSH_USING_MSH
     #define FINSH_USING_MSH_ONLY
