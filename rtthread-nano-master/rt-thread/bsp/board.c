@@ -73,8 +73,12 @@ RT_WEAK void *rt_heap_end_get(void)
  */
 #include "main.h"
 #include "rtthread.h"
+#include "adx355_driver.h"
 static rt_mq_t usart1_mq = NULL;
 extern UART_HandleTypeDef huart1;
+extern DMA_HandleTypeDef hdma_usart1_tx;
+rt_mutex_t console_mutex;
+static char * rt_log_buf2;
 
 void SystemClock_Config(void);
 void rt_hw_board_init()
@@ -82,6 +86,7 @@ void rt_hw_board_init()
     HAL_Init();
     SystemClock_Config();
     MX_GPIO_Init();
+    MX_DMA_Init();
     MX_SPI2_Init();
 
     /* System Clock Update */
@@ -106,13 +111,34 @@ void rt_hw_board_init()
     MX_USART1_UART_Init();
     //开启串口 
     //使用消息队列来传送串口接收数据
-    usart1_mq = rt_mq_create("usart1_recv_mq", 1, 128, RT_IPC_FLAG_FIFO);
+    usart1_mq = rt_mq_create("usart1_recv_mq", 1, 128, RT_IPC_FLAG_PRIO);
     if(usart1_mq == RT_NULL){
-        rt_kprintf("rt_mq_create usart1_recv_mq failed, system halt");
+        rt_kprintf("rt_mq_create usart1_recv_mq failed, system halt\n");
         while(1);
     }
+    console_mutex = rt_mutex_create("console_mutext", RT_IPC_FLAG_PRIO);
+    if(console_mutex == RT_NULL){
+        rt_kprintf("rt_mutex_create console_mutext failed, output may not right\n");
+    }
+    rt_log_buf2 = rt_malloc(RT_CONSOLEBUF_SIZE);
+    if(rt_log_buf2 == NULL){
+        rt_kprintf("rt_malloc rt_log_buf2 failed, system halt\n");
+        while(1);
+    }
+
     /* 手动开启串口中断位 */
     SET_BIT(huart1.Instance->CR1, USART_CR1_PEIE | USART_CR1_RXNEIE);
+
+    /* sd卡初始化 */
+    //MX_SDMMC1_SD_Init();
+
+    /* 项目驱动初始化 */
+    int ret = adx355_driver_init();
+    if(ret <0){
+        rt_kprintf("adx355_driver_init failed, error code is:[%d]\n",ret);
+        rt_kprintf("system halt\n");
+        while(1);
+    }
 }
 
 void SysTick_Handler(void)
@@ -145,20 +171,49 @@ char rt_hw_console_getchar(void){
     return ch;
 }
 
+typedef struct
+{
+  __IO uint32_t ISR;   /*!< DMA interrupt status register */
+  __IO uint32_t Reserved0;
+  __IO uint32_t IFCR;  /*!< DMA interrupt flag clear register */
+} DMA_Base_Registers;
 void rt_hw_console_output(const char *str)
 {
-    rt_size_t i = 0, size = 0;
-    char a = '\r';
+    // rt_size_t i = 0, size = 0;
+    // char a = '\r';
 
-    __HAL_UNLOCK(&huart1);
+    // __HAL_UNLOCK(&huart1);
 
-    size = rt_strlen(str);
-    for (i = 0; i < size; i++)
-    {
-        if (*(str + i) == '\n')
-        {
-            HAL_UART_Transmit(&huart1, (uint8_t *)&a, 1, 50);
+    // size = rt_strlen(str);
+    // for (i = 0; i < size; i++)
+    // {
+    //     if (*(str + i) == '\n')
+    //     {
+    //         HAL_UART_Transmit(&huart1, (uint8_t *)&a, 1, 500);
+    //     }
+    //     HAL_UART_Transmit(&huart1, (uint8_t *)(str + i), 1, 500);
+    // }
+    size_t size = rt_strlen(str);
+    size_t i = 0;
+    for(size_t c=0;c<size;c++) {
+        rt_log_buf2[i++] = str[c];
+        if(str[c] == '\n') {
+            rt_log_buf2[i++] = '\r';
         }
-        HAL_UART_Transmit(&huart1, (uint8_t *)(str + i), 1, 50);
     }
+    rt_log_buf2[i++] = '\0';
+
+    if(rt_thread_self()!=0)
+        rt_mutex_take(console_mutex, RT_WAITING_FOREVER);
+    HAL_UART_Transmit_DMA(&huart1, (uint8_t *)rt_log_buf2, rt_strlen(rt_log_buf2));
+    volatile uint32_t *isr_reg  = &(((DMA_Base_Registers *)hdma_usart1_tx.StreamBaseAddress)->ISR);
+    volatile uint32_t *ifcr_reg = &(((DMA_Base_Registers *)hdma_usart1_tx.StreamBaseAddress)->IFCR);
+    while(((*isr_reg) & (DMA_FLAG_TCIF0_4 << (hdma_usart1_tx.StreamIndex & 0x1FU))) == 0U);
+    *ifcr_reg = DMA_FLAG_HTIF0_4 << (hdma_usart1_tx.StreamIndex & 0x1FU);
+    *ifcr_reg = (DMA_FLAG_TCIF0_4) << (hdma_usart1_tx.StreamIndex & 0x1FU);
+    huart1.gState  = HAL_UART_STATE_READY;
+    __HAL_UNLOCK(&hdma_usart1_tx);
+    hdma_usart1_tx.State = HAL_DMA_STATE_READY;
+    if(rt_thread_self()!=0)
+      rt_mutex_release(console_mutex);
 }

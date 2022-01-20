@@ -59,8 +59,10 @@ void Error_Handler(void);
 
 /* Private defines -----------------------------------------------------------*/
 void   MX_GPIO_Init(void);
+void   MX_DMA_Init(void);
 void   MX_USART1_UART_Init(void);
 void   MX_SPI2_Init(void);
+void   MX_SDMMC1_SD_Init(void);
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */
