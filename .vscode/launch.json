@@ -12,7 +12,8 @@
             "type": "cortex-debug",
             "device": "STM32H743II",
             "servertype": "jlink",
-            "gdbPath": "Z:/gcc-arm-none-eabi-10.3-2021.10-win32/gcc-arm-none-eabi-10.3-2021.10/bin/arm-none-eabi-gdb.exe"
+            "gdbPath": "Z:/gcc-arm-none-eabi-10.3-2021.10-win32/gcc-arm-none-eabi-10.3-2021.10/bin/arm-none-eabi-gdb.exe",
+            "svdFile": "STM32H743.svd",
         }
     ]
 }
