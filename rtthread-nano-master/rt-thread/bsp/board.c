@@ -86,8 +86,11 @@ void rt_hw_board_init()
     HAL_Init();
     SystemClock_Config();
     MX_GPIO_Init();
+    HAL_NVIC_DisableIRQ(EXTI15_10_IRQn);
     MX_DMA_Init();
-    MX_SPI2_Init();
+    HAL_NVIC_DisableIRQ(DMA1_Stream2_IRQn);// 关闭串口DMA中断，手动处理
+    MX_SPI2_Init(); 
+    MX_TIM1_Init();
 
     /* System Clock Update */
     SystemCoreClockUpdate();

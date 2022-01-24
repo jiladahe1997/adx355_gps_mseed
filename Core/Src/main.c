@@ -48,6 +48,8 @@ SPI_HandleTypeDef hspi2;
 DMA_HandleTypeDef hdma_spi2_rx;
 DMA_HandleTypeDef hdma_spi2_tx;
 
+TIM_HandleTypeDef htim1;
+
 UART_HandleTypeDef huart1;
 DMA_HandleTypeDef hdma_usart1_tx;
 
@@ -58,7 +60,26 @@ DMA_HandleTypeDef hdma_usart1_tx;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
+/* 定时器中断 
+ * 0.1ms中断一次，每1ms拉高GPIO，并在1.1ms拉低GPIO
+ */
+static uint8_t HAL_TIM_PeriodElapsedCallback_Counter=0;
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if(htim == &htim1){
+      __NOP();
+      HAL_TIM_PeriodElapsedCallback_Counter++;
 
+      if(HAL_GPIO_ReadPin(GPIOI, GPIO_PIN_11) == GPIO_PIN_RESET){
+        if(HAL_TIM_PeriodElapsedCallback_Counter >= 10){
+          HAL_GPIO_WritePin(GPIOI, GPIO_PIN_11, GPIO_PIN_SET);
+          HAL_TIM_PeriodElapsedCallback_Counter=0;
+        }
+      }else{
+        HAL_GPIO_WritePin(GPIOI, GPIO_PIN_11, GPIO_PIN_RESET);
+      }
+    }
+}
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -79,20 +100,20 @@ int main(void)
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  // HAL_Init();
+  HAL_Init();
 
   /* USER CODE BEGIN Init */
   rt_kprintf("starting init adx355...\n");
-  rt_kprintf("read IDs...\n");
   /*
-   * 读取4个ID，验证芯�?
+   * 读取4个ID，验证芯�????
      1. ADI ID 正确值为 0xAD
      2. ADI MEMS ID 正确值为 0x1D
      3. 器件ID 正确值为 0xED
      4. 产品ID 正确值为 0x01
    */
+  rt_kprintf("read IDs...\n");
   uint8_t IDs[4];
-  int ret = read_reg(0, 4, IDs);
+  int ret = read_reg_sync(0, 4, IDs);
   if(ret<0){
     rt_kprintf("read_reg failed, error code is[%d]\n",ret);
   }else{
@@ -100,7 +121,61 @@ int main(void)
       rt_kprintf("id[%d]:[%x]\n", i, IDs[i]);
     }
   }
+  rt_kprintf("\n\n");
 
+  rt_kprintf("reset adxl355\n");
+  uint8_t RESET = 0x52;
+  ret = write_reg_sync(0x2F, 1, &RESET);
+  if(ret < 0){
+    rt_kprintf("write_reg_sync RESET failed, error code is[%d]\n", ret);
+  }
+
+  rt_thread_mdelay(100);
+
+  rt_kprintf("prepare to set Sync:EXT_SYNC to 10\n");
+  uint8_t EXT_SYNC;
+  ret = read_reg_sync(0x2b, 1, &EXT_SYNC);
+  if(ret < 0){
+    rt_kprintf("write_reg_sync EXT_SYNC failed, error code is[%d]\n", ret);
+  }
+  rt_kprintf("Sync:EXT_SYNC now is:[%d]\n",EXT_SYNC);
+  rt_kprintf("writing reg...\n");
+  CLEAR_BIT(EXT_SYNC, 1<<0);
+  SET_BIT(EXT_SYNC, 1<<1);
+  ret = write_reg_sync(0x2b, 1, &EXT_SYNC);
+  if(ret < 0){
+    rt_kprintf("write_reg_sync EXT_SYNC failed, error code is[%d]\n", ret);
+  }
+  rt_kprintf("write ok\n");
+  ret = read_reg_sync(0x2b, 1, &EXT_SYNC);
+  if(ret < 0){
+    rt_kprintf("write_reg_sync EXT_SYNC failed, error code is[%d]\n", ret);
+  }
+  rt_kprintf("Sync:EXT_SYNC now is:[%d]\n",EXT_SYNC);
+  rt_kprintf("\n\n");
+  rt_kprintf("prepare to set POWER_CTL:STANDBY to 0\n");
+  uint8_t STANDBY;
+  ret = read_reg_sync(0x2d, 1, &STANDBY);
+  if(ret < 0){
+    rt_kprintf("write_reg_sync POWER_CTL failed, error code is[%d]\n", ret);
+  }
+  rt_kprintf("POWER_CTL:STANDBY now is:[%d]\n",STANDBY);
+  rt_kprintf("writing reg...\n");
+  CLEAR_BIT(STANDBY, 1<<0);
+  ret = write_reg_sync(0x2d, 1, &STANDBY);
+  if(ret < 0){
+    rt_kprintf("write_reg_sync POWER_CTL failed, error code is[%d]\n", ret);
+  }
+  rt_kprintf("write ok\n");
+  ret = read_reg_sync(0x2d, 1, &STANDBY);
+  if(ret < 0){
+    rt_kprintf("write_reg_sync POWER_CTL failed, error code is[%d]\n", ret);
+  }
+  rt_kprintf("POWER_CTL:STANDBY now is:[%d]\n",STANDBY);
+
+  rt_thread_mdelay(1000);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+  HAL_TIM_Base_Start_IT(&htim1);
   /* USER CODE END Init */
 
   /* USER CODE BEGIN SysInit */
@@ -272,6 +347,53 @@ void MX_SPI2_Init(void)
 }
 
 /**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
+void MX_TIM1_Init(void)
+{
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 240-1;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 500;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -336,8 +458,8 @@ void MX_DMA_Init(void)
   HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
   /* DMA1_Stream2_IRQn interrupt configuration */
-  // HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, 0, 0);
-  // HAL_NVIC_EnableIRQ(DMA1_Stream2_IRQn);
+  HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream2_IRQn);
 
 }
 
@@ -351,6 +473,7 @@ void MX_GPIO_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOI_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
@@ -359,7 +482,17 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOG_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOI, GPIO_PIN_11, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOG, GPIO_PIN_10, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PI11 */
+  GPIO_InitStruct.Pin = GPIO_PIN_11;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOI, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PG10 */
   GPIO_InitStruct.Pin = GPIO_PIN_10;
@@ -367,6 +500,16 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PG12 */
+  GPIO_InitStruct.Pin = GPIO_PIN_12;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
 }
 
