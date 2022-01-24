@@ -94,14 +94,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+  MX_SDMMC1_SD_Init();
+  adx355_driver_init_later();
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  HAL_Init();
-
+  //HAL_Init();
+  
   /* USER CODE BEGIN Init */
   rt_kprintf("starting init adx355...\n");
   /*

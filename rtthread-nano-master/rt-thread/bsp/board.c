@@ -79,6 +79,9 @@ extern UART_HandleTypeDef huart1;
 extern DMA_HandleTypeDef hdma_usart1_tx;
 rt_mutex_t console_mutex;
 static char * rt_log_buf2;
+static struct rt_memheap _heap1;
+static struct rt_memheap _heap2;
+static struct rt_memheap _heap3;
 
 void SystemClock_Config(void);
 void rt_hw_board_init()
@@ -107,7 +110,29 @@ void rt_hw_board_init()
 #endif
 
 #if defined(RT_USING_USER_MAIN) && defined(RT_USING_HEAP)
-    rt_system_heap_init(rt_heap_begin_get(), rt_heap_end_get());
+    // rt_system_heap_init(rt_heap_begin_get(), rt_heap_end_get());
+/* 
+DTCMRAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 128K
+RAM_D1 (xrw)      : ORIGIN = 0x24000000, LENGTH = 512K
+RAM_D2 (xrw)      : ORIGIN = 0x30000000, LENGTH = 288K
+RAM_D3 (xrw)      : ORIGIN = 0x38000000, LENGTH = 64K
+ITCMRAM (xrw)      : ORIGIN = 0x00000000, LENGTH = 64K 
+    rt_memheap_init(0x24000000, 0x24080000);
+    rt_memheap_init(0x30000000, 0x30048000);
+    rt_memheap_init(0x38000000, 0x38010000);
+*/
+    rt_memheap_init(&_heap3,
+                    "heap3",
+                    0x38000000,
+                    (rt_uint32_t)0x38010000 - (rt_uint32_t)0x38000000);
+    rt_memheap_init(&_heap2,
+                    "heap2",
+                    0x30000000,
+                    (rt_uint32_t)0x30048000 - (rt_uint32_t)0x30000000);
+    rt_memheap_init(&_heap1,
+                    "heap1",
+                    0x24000000,
+                    (rt_uint32_t)0x24080000 - (rt_uint32_t)0x24000000);
 #endif
 
     //初始化串口
@@ -150,6 +175,7 @@ void SysTick_Handler(void)
     rt_interrupt_enter();
 
     rt_tick_increase();
+    HAL_IncTick();
 
     /* leave interrupt */
     rt_interrupt_leave();

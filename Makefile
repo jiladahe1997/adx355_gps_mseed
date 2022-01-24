@@ -83,8 +83,8 @@ ASM_SOURCES += \
 rtthread-nano-master/rt-thread/libcpu/arm/cortex-m7/context_gcc.s
 
 # fatfs
-# C_SOURCES += \
-# $(wildcard ff14b/source/*.c)
+C_SOURCES += \
+$(wildcard ff14b/source/*.c)
 
 # user code
 C_SOURCES +=\
@@ -150,7 +150,8 @@ C_INCLUDES =  \
 -Irtthread-nano-master/rt-thread/bsp \
 -Irtthread-nano-master/rt-thread/components/finsh \
 -Iff14b/source \
--ICore/Src/adxl355_driver
+-ICore/Src/adxl355_driver\
+-ICore/Src/libmseed-2.19.6
 
 # compile gcc flags
 ASFLAGS = $(MCU) $(AS_DEFS) $(AS_INCLUDES) $(OPT) -Wall -fdata-sections -ffunction-sections
@@ -175,9 +176,10 @@ CFLAGS += -MMD -MP -MF"$(@:%.o=%.d)"
 LDSCRIPT = STM32H743IITx_FLASH.ld
 
 # libraries
-LIBS = -lc -lm -lnosys 
+LIBS = -lc -lm -lnosys -lgcc
 LIBDIR = 
 LDFLAGS = $(MCU) -specs=nano.specs -T$(LDSCRIPT) $(LIBDIR) $(LIBS) -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref 
+LDFLAGS += -lmseed -LCore/Src/libmseed-2.19.6_bkup --specs=nosys.specs
 
 # default action: build all
 all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).hex $(BUILD_DIR)/$(TARGET).bin

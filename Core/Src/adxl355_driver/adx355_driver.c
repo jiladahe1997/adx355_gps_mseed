@@ -39,7 +39,9 @@ STATIC SPI_DMA_WRITE_CALLBACK write_reg_cb=NULL;
  *                        每1分钟的数据量为 10800字节，约等于 108k
  */
 #define ADX355_DATA_SIZE_EACH   9
-#define ADX355_DATA_MQ_BUFFER   2*60*200*9
+#define ADX355_SAMPRATE         200
+#define ADX355_RECORD_SECOND    20
+#define ADX355_DATA_MQ_BUFFER   2*ADX355_RECORD_SECOND*ADX355_SAMPRATE*ADX355_DATA_SIZE_EACH// 数据缓冲区大小 2分钟
 STATIC uint8_t* adx355_data_buffer;//传感器数据缓冲区
 STATIC uint32_t adx355_data_buffer_counter=0;
 
@@ -261,10 +263,10 @@ static void read_adx355_data_cb(uint8_t *buffer, uint8_t size, void *user_data){
     register rt_base_t temp;
     temp = rt_hw_interrupt_disable();
 
-    rt_memcpy(&adx355_data_buffer[adx355_data_buffer_counter++], buffer, size);
-
+    rt_memcpy(&adx355_data_buffer[adx355_data_buffer_counter], buffer, size);
+    adx355_data_buffer_counter+=size;
     rt_hw_interrupt_enable(temp); 
-    if(adx355_data_buffer_counter % 100 == 0)
+    if(adx355_data_buffer_counter % (ADX355_RECORD_SECOND*ADX355_SAMPRATE*ADX355_DATA_SIZE_EACH) == 0)
         rt_event_send(adx355_data_enough, _ADX355_DATA_ENOUGH);
 }
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
@@ -281,7 +283,92 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 /**
  * @brief 线程，数据量够1分钟后，启动存SD卡
  */
+#include "libmseed.h"
+#include "ff.h"
+static void
+ms_record_handler_int (char *record, int reclen, void *ofp)
+{
+  FRESULT f_ret;
+  UINT bw;
+  f_ret = f_write ((FIL*)ofp, record, reclen, &bw);
+  if(f_ret != FR_OK){
+      rt_kprintf("f_write failed, error code is:[%d]\n", f_ret);
+  }
+  if(bw != reclen){
+      rt_kprintf("ms_record_handler_int bw not equal reclen, bw is:[%d], reclen is:[%d]\n", bw, reclen);
+  }
+} /* End of ms_record_handler_int() */
+
+/**
+ * @brief 写miniseed文件，一次写一个通道，一个完整的miniseed需要写UD、EW、NS三个通道。写三次。
+ * @param filename 文件名
+ * @param timestr 时间戳，字符串类型，传递给ms_timestr2hptime
+ * @param channel 通道，UD EW NS 三者之一
+ * @param buffer  数据buffer
+ * @param size    数据buffer大小
+ */
+STATIC MSRecord *msr = 0;
+static int write_file_one_channel(char *filename, char* timestr, char *channel, uint32_t *buffer, uint32_t size){
+
+        msr = msr_init(NULL);
+        if(msr == NULL){
+            rt_kprintf("msr_init failed!\n");
+        }
+
+        msr->samprate = ADX355_SAMPRATE;
+        msr->numsamples = size;
+        msr->starttime = ms_timestr2hptime(timestr);
+        strcpy(msr->channel, channel);
+        msr->datasamples = buffer; /* pointer to 32-bit integer data samples */
+        strcpy(msr->station, "TYSD-");
+        strcpy(msr->network, "NE");
+        msr->dataquality = 'D';
+        msr->encoding = 11;
+        msr->byteorder = 1;
+        msr->sampletype = 'i';
+        msr->reclen = 4096;
+        msr->sequence_number = 1;
+
+        FRESULT f_ret;
+        FIL fil;
+        f_ret = f_open(&fil, filename,  FA_WRITE | FA_OPEN_APPEND);
+        if(f_ret != FR_OK){
+            rt_kprintf("f_open failed, error code is %d\r\n", f_ret);
+            return -1;
+        }
+        int packedrecords = msr_pack(msr, &ms_record_handler_int, &fil, NULL, 1, 0);
+        rt_kprintf("write %s, packedrecords:[%d]\n", filename, packedrecords);
+        f_close(&fil);
+        msr->datasamples = NULL;
+        msr_free(&msr);
+
+        return 0;
+}
+
 void adx355_driver_data_record_thread_entry(void *parameter){
+    FRESULT f_ret;
+    FIL fil;
+    FATFS *fs;
+    fs = rt_malloc(sizeof (FATFS));
+    f_ret = f_mount(fs, "1:/", 1);
+    if(f_ret != FR_OK){
+        rt_kprintf("adx355_driver_data_record_thread_entry f_mount failed, error code is %d\r\n", f_ret);
+    }
+
+    f_ret = f_open(&fil, "1:/test.txt", FA_CREATE_ALWAYS | FA_WRITE);
+    if(f_ret != FR_OK){
+        rt_kprintf("adx355_driver_data_record_thread_entry f_open failed, error code is %d\r\n", f_ret);
+    }
+    UINT bw = 0;
+    f_ret = f_write(&fil, "test", 5, &bw);
+    if(f_ret != FR_OK){
+        rt_kprintf("f_write failed, error code is %d\r\n", f_ret);
+    }
+    if(bw != 5){
+        rt_kprintf("bw != data_size_each, bw is %d\r\n", bw);
+    }
+
+    f_close(&fil);
     while(1){
         rt_uint32_t e;
         rt_err_t rt_ret;
@@ -291,27 +378,70 @@ void adx355_driver_data_record_thread_entry(void *parameter){
         }
         UNUSED(e);
         
-        // //取出数据
+        uint32_t *buffer = rt_malloc(ADX355_RECORD_SECOND*ADX355_SAMPRATE*sizeof(uint32_t));
+        rt_memset(buffer, 0, ADX355_RECORD_SECOND*ADX355_SAMPRATE*sizeof(uint32_t));
+        uint32_t buffer_counter=0;
+        if(buffer == NULL){
+            rt_kprintf("adx355_driver_data_record_thread_entry buffer malloc failed\n");
+            continue;
+        }
+        //copy x axis data to buffer
+        for(int i=0;i<ADX355_RECORD_SECOND*ADX355_SAMPRATE*ADX355_DATA_SIZE_EACH;){
+            buffer[buffer_counter] = (adx355_data_buffer[i] << 12);
+            buffer[buffer_counter] |= (adx355_data_buffer[i+1] << 4);
+            buffer[buffer_counter] |= (adx355_data_buffer[i+2] >> 4);
+
+            buffer_counter++;
+            i+=ADX355_DATA_SIZE_EACH;
+        }
+        write_file_one_channel("1:/20220124T140800.mseed", "2022-01-24T14:08:00", "EW", buffer, buffer_counter);
+        buffer_counter=0;
+
+        for(int i=3;i<ADX355_RECORD_SECOND*ADX355_SAMPRATE*ADX355_DATA_SIZE_EACH;){
+            buffer[buffer_counter] = (adx355_data_buffer[i] << 12);
+            buffer[buffer_counter] |= (adx355_data_buffer[i+1] << 4);
+            buffer[buffer_counter] |= (adx355_data_buffer[i+2] >> 4);
+
+            buffer_counter++;
+            i+=ADX355_DATA_SIZE_EACH;
+        }
+
+        write_file_one_channel("1:/20220124T140800.mseed", "2022-01-24T14:08:00", "NS", buffer, buffer_counter);
+        buffer_counter=0;
+
+        for(int i=6;i<ADX355_RECORD_SECOND*ADX355_SAMPRATE*ADX355_DATA_SIZE_EACH;){
+            buffer[buffer_counter] = (adx355_data_buffer[i] << 12);
+            buffer[buffer_counter] |= (adx355_data_buffer[i+1] << 4);
+            buffer[buffer_counter] |= (adx355_data_buffer[i+2] >> 4);
+
+            buffer_counter++;
+            i+=ADX355_DATA_SIZE_EACH;
+        }
+        write_file_one_channel("1:/20220124T140800.mseed", "2022-01-24T14:08:00", "UD", buffer, buffer_counter);
+        buffer_counter=0;
+
+
+   
+
+        // //debug打印第一条数据
+        // rt_kprintf("x:[%d] y:[%d] z:[%d]\n", x, y,z);
+        // rt_uint32_t x = adx355_data_buffer[0] << 12;
+        // x |= adx355_data_buffer[1] << 4;
+        // x |= adx355_data_buffer[2] >> 4;
+        // rt_uint32_t y = adx355_data_buffer[3] << 12;
+        // y |= adx355_data_buffer[4] << 4;
+        // y |= adx355_data_buffer[5] >> 4;
+        // rt_uint32_t z = adx355_data_buffer[6] << 12;
+        // z |= adx355_data_buffer[7] << 4;
+        // z |= adx355_data_buffer[8] >> 4;
+
+
         register rt_base_t temp;
         temp = rt_hw_interrupt_disable();
 
-        rt_uint32_t x = adx355_data_buffer[0] << 12;
-        x |= adx355_data_buffer[1] << 4;
-        x |= adx355_data_buffer[2] >> 4;
-        rt_uint32_t y = adx355_data_buffer[3] << 12;
-        y |= adx355_data_buffer[4] << 4;
-        y |= adx355_data_buffer[5] >> 4;
-        rt_uint32_t z = adx355_data_buffer[6] << 12;
-        z |= adx355_data_buffer[7] << 4;
-        z |= adx355_data_buffer[8] >> 4;
-
         adx355_data_buffer_counter = 0;
+
         rt_hw_interrupt_enable(temp); 
-
-
-        //debug打印第一条数据
-
-        rt_kprintf("x:[%d] y:[%d] z:[%d]\n", x, y,z);
     }
 }
 
@@ -346,11 +476,11 @@ int adx355_driver_init(){
     return 0;
 }
 
-STATIC int adx355_driver_init_later(void){
+int adx355_driver_init_later(void){
     rt_err_t ret;
     rt_thread_t adx355_driver_data_record_thread_t = rt_thread_create("adx355_data_rec",
                                     adx355_driver_data_record_thread_entry, NULL, 
-                                    2048, 2, 20);
+                                    4096, 2, 20);
     if(adx355_driver_data_record_thread_t == NULL) {
         rt_kprintf("adx355_driver_data_record_thread_t create failed!\n");
         return -1;
@@ -364,4 +494,3 @@ STATIC int adx355_driver_init_later(void){
     return 0;
 
 }
-INIT_APP_EXPORT(adx355_driver_init_later);

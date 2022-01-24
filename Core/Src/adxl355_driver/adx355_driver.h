@@ -2,6 +2,7 @@
 #define __ADX355_DRIVER_H__
 
 int adx355_driver_init(void);
+int adx355_driver_init_later(void);
 int write_reg_sync(uint8_t address, uint8_t num, uint8_t* tx_buffer);
 int read_reg_sync(uint8_t address, uint8_t num, uint8_t* rx_buffer);
 
