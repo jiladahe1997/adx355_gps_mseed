@@ -33,8 +33,9 @@ DSTATUS disk_status (
 
 	switch (pdrv) {
 	case DEV_MMC :
-		ret = HAL_SD_GetCardState(&hsd1);
-		return ret == HAL_SD_CARD_TRANSFER ? RES_OK : STA_NOINIT;
+		// ret = HAL_SD_GetCardState(&hsd1);
+		// return ret == HAL_SD_CARD_TRANSFER ? RES_OK : STA_NOINIT;
+		return RES_OK;
 	default:
 		break;
 	}
@@ -59,6 +60,7 @@ DSTATUS disk_initialize (
 		if(dma_rx_buffer == NULL || dma_tx_buffer == NULL) {
 			return RES_ERROR;
 		}
+		rt_kprintf("address of SDMMC DMA:[%p] [%p]\n", dma_rx_buffer, dma_tx_buffer);
 		/* sd卡在sdcard_driver.c中进行初始化 */
 		return RES_OK;
 	default:

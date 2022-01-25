@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "rtthread.h"
 #include "adx355_driver.h"
+#include "gps_driver.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,6 +52,7 @@ DMA_HandleTypeDef hdma_spi2_tx;
 TIM_HandleTypeDef htim1;
 
 UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
 DMA_HandleTypeDef hdma_usart1_tx;
 
 /* USER CODE BEGIN PV */
@@ -84,7 +86,26 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+ #define WORK_GPIO_GROUP GPIOE
+ #define WORK_GPIO_PIN   GPIO_PIN_3
 
+ #define SENSOR_GPIO_GROUP GPIOB
+ #define SENSOR_GPIO_PIN   GPIO_PIN_2
+
+ #define GPS_GPIO_1_GROUP  GPIOA
+ #define GPS_GPIO_1_PIN    GPIO_PIN_5
+
+ #define GPS_GPIO_2_GROUP  GPIOE
+ #define GPS_GPIO_2_PIN    GPIO_PIN_2
+ 
+ #define GPS_GPIO_3_GROUP  GPIOE
+ #define GPS_GPIO_3_PIN    GPIO_PIN_4
+
+ #define GPS_GPIO_4_GROUP  GPIOE
+ #define GPS_GPIO_4_PIN    GPIO_PIN_6
+ extern uint32_t adx355_data_buffer_counter;
+ extern uint8_t star_num;
+ extern uint8_t UBX_NAV_TIMEGPS_VALID;
 /* USER CODE END 0 */
 
 /**
@@ -96,87 +117,15 @@ int main(void)
   /* USER CODE BEGIN 1 */
   MX_SDMMC1_SD_Init();
   adx355_driver_init_later();
+  gps_driver_init_later();
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   //HAL_Init();
-  
+
   /* USER CODE BEGIN Init */
-  rt_kprintf("starting init adx355...\n");
-  /*
-   * 读取4个ID，验证芯�????
-     1. ADI ID 正确值为 0xAD
-     2. ADI MEMS ID 正确值为 0x1D
-     3. 器件ID 正确值为 0xED
-     4. 产品ID 正确值为 0x01
-   */
-  rt_kprintf("read IDs...\n");
-  uint8_t IDs[4];
-  int ret = read_reg_sync(0, 4, IDs);
-  if(ret<0){
-    rt_kprintf("read_reg failed, error code is[%d]\n",ret);
-  }else{
-    for(int i=0;i<4;i++){
-      rt_kprintf("id[%d]:[%x]\n", i, IDs[i]);
-    }
-  }
-  rt_kprintf("\n\n");
-
-  rt_kprintf("reset adxl355\n");
-  uint8_t RESET = 0x52;
-  ret = write_reg_sync(0x2F, 1, &RESET);
-  if(ret < 0){
-    rt_kprintf("write_reg_sync RESET failed, error code is[%d]\n", ret);
-  }
-
-  rt_thread_mdelay(100);
-
-  rt_kprintf("prepare to set Sync:EXT_SYNC to 10\n");
-  uint8_t EXT_SYNC;
-  ret = read_reg_sync(0x2b, 1, &EXT_SYNC);
-  if(ret < 0){
-    rt_kprintf("write_reg_sync EXT_SYNC failed, error code is[%d]\n", ret);
-  }
-  rt_kprintf("Sync:EXT_SYNC now is:[%d]\n",EXT_SYNC);
-  rt_kprintf("writing reg...\n");
-  CLEAR_BIT(EXT_SYNC, 1<<0);
-  SET_BIT(EXT_SYNC, 1<<1);
-  ret = write_reg_sync(0x2b, 1, &EXT_SYNC);
-  if(ret < 0){
-    rt_kprintf("write_reg_sync EXT_SYNC failed, error code is[%d]\n", ret);
-  }
-  rt_kprintf("write ok\n");
-  ret = read_reg_sync(0x2b, 1, &EXT_SYNC);
-  if(ret < 0){
-    rt_kprintf("write_reg_sync EXT_SYNC failed, error code is[%d]\n", ret);
-  }
-  rt_kprintf("Sync:EXT_SYNC now is:[%d]\n",EXT_SYNC);
-  rt_kprintf("\n\n");
-  rt_kprintf("prepare to set POWER_CTL:STANDBY to 0\n");
-  uint8_t STANDBY;
-  ret = read_reg_sync(0x2d, 1, &STANDBY);
-  if(ret < 0){
-    rt_kprintf("write_reg_sync POWER_CTL failed, error code is[%d]\n", ret);
-  }
-  rt_kprintf("POWER_CTL:STANDBY now is:[%d]\n",STANDBY);
-  rt_kprintf("writing reg...\n");
-  CLEAR_BIT(STANDBY, 1<<0);
-  ret = write_reg_sync(0x2d, 1, &STANDBY);
-  if(ret < 0){
-    rt_kprintf("write_reg_sync POWER_CTL failed, error code is[%d]\n", ret);
-  }
-  rt_kprintf("write ok\n");
-  ret = read_reg_sync(0x2d, 1, &STANDBY);
-  if(ret < 0){
-    rt_kprintf("write_reg_sync POWER_CTL failed, error code is[%d]\n", ret);
-  }
-  rt_kprintf("POWER_CTL:STANDBY now is:[%d]\n",STANDBY);
-
-  rt_thread_mdelay(1000);
-  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
-  HAL_TIM_Base_Start_IT(&htim1);
   /* USER CODE END Init */
 
   /* USER CODE BEGIN SysInit */
@@ -185,7 +134,9 @@ int main(void)
 
   /* Initialize all configured peripherals */
   /* USER CODE BEGIN 2 */
-
+  uint32_t last_adx355_data_buffer_counter=adx355_data_buffer_counter;
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_5, GPIO_PIN_SET);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -193,6 +144,52 @@ int main(void)
   while (1)
   {
     rt_thread_mdelay(500);
+    
+    /**
+     * LED灯 控制
+     */
+
+    // 电源灯 常亮
+    HAL_GPIO_TogglePin(WORK_GPIO_GROUP, WORK_GPIO_PIN);
+
+    // sensor灯根据last_adx355_data_buffer_counter 常闪
+    if(last_adx355_data_buffer_counter != adx355_data_buffer_counter){
+      HAL_GPIO_TogglePin(SENSOR_GPIO_GROUP, SENSOR_GPIO_PIN);
+    }else{
+      HAL_GPIO_WritePin(SENSOR_GPIO_GROUP, SENSOR_GPIO_PIN, GPIO_PIN_SET);
+    }
+    last_adx355_data_buffer_counter = adx355_data_buffer_counter;
+
+    // gps信号灯根据star_num 常亮
+    if(star_num ==0){
+      HAL_GPIO_WritePin(GPS_GPIO_1_GROUP, GPS_GPIO_1_PIN, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(GPS_GPIO_2_GROUP, GPS_GPIO_2_PIN, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(GPS_GPIO_3_GROUP, GPS_GPIO_3_PIN, GPIO_PIN_SET);
+    } 
+    else if(star_num <= 5){
+      HAL_GPIO_WritePin(GPS_GPIO_1_GROUP, GPS_GPIO_1_PIN, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(GPS_GPIO_2_GROUP, GPS_GPIO_2_PIN, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(GPS_GPIO_3_GROUP, GPS_GPIO_3_PIN, GPIO_PIN_SET);
+    } else if(star_num <= 10){
+      HAL_GPIO_WritePin(GPS_GPIO_1_GROUP, GPS_GPIO_1_PIN, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(GPS_GPIO_2_GROUP, GPS_GPIO_2_PIN, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(GPS_GPIO_3_GROUP, GPS_GPIO_3_PIN, GPIO_PIN_SET);
+    } else if(star_num >10){
+      HAL_GPIO_WritePin(GPS_GPIO_1_GROUP, GPS_GPIO_1_PIN, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(GPS_GPIO_2_GROUP, GPS_GPIO_2_PIN, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(GPS_GPIO_3_GROUP, GPS_GPIO_3_PIN, GPIO_PIN_RESET);
+    } else {
+      HAL_GPIO_WritePin(GPS_GPIO_1_GROUP, GPS_GPIO_1_PIN, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(GPS_GPIO_2_GROUP, GPS_GPIO_2_PIN, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(GPS_GPIO_3_GROUP, GPS_GPIO_3_PIN, GPIO_PIN_SET);
+    }
+
+    if(UBX_NAV_TIMEGPS_VALID==7){
+      HAL_GPIO_WritePin(GPS_GPIO_4_GROUP, GPS_GPIO_4_PIN, GPIO_PIN_RESET);
+    }else{
+      HAL_GPIO_WritePin(GPS_GPIO_4_GROUP, GPS_GPIO_4_PIN, GPIO_PIN_SET);
+    }
+
 
     /* USER CODE END WHILE */
 
@@ -256,10 +253,11 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USART1|RCC_PERIPHCLK_SPI2
-                              |RCC_PERIPHCLK_SDMMC;
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USART2|RCC_PERIPHCLK_USART1
+                              |RCC_PERIPHCLK_SPI2|RCC_PERIPHCLK_SDMMC;
   PeriphClkInitStruct.SdmmcClockSelection = RCC_SDMMCCLKSOURCE_PLL;
   PeriphClkInitStruct.Spi123ClockSelection = RCC_SPI123CLKSOURCE_PLL;
+  PeriphClkInitStruct.Usart234578ClockSelection = RCC_USART234578CLKSOURCE_D2PCLK1;
   PeriphClkInitStruct.Usart16ClockSelection = RCC_USART16CLKSOURCE_D2PCLK2;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
   {
@@ -443,6 +441,54 @@ void MX_USART1_UART_Init(void)
 }
 
 /**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 9600;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
 void MX_DMA_Init(void)
@@ -474,25 +520,65 @@ void MX_GPIO_Init(void)
   GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOI_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOG_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5
+                          |GPIO_PIN_6, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOI, GPIO_PIN_11, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4|GPIO_PIN_5, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1|GPIO_PIN_2, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOG, GPIO_PIN_10, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : PE2 PE3 PE4 PE5
+                           PE6 */
+  GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5
+                          |GPIO_PIN_6;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PI11 */
   GPIO_InitStruct.Pin = GPIO_PIN_11;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOI, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PA4 PA5 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PB1 PB2 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_2;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PI1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOI, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PG10 */
@@ -509,6 +595,9 @@ void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI1_IRQn);
+
   HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 

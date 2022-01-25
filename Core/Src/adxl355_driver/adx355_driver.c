@@ -7,6 +7,7 @@
 #include "rthw.h"  // rt_hw_interrupt_disable
 #include "main.h"
 #include "adx355_driver.h"
+#include "time.h" //struct time
 
 #ifndef STATIC
 #define STATIC static 
@@ -16,6 +17,10 @@
 #define _HAL_SPI_EVENT_RxCpltCallback     1<<1
 #define _HAL_SPI_EVENT_ERROR              1<<2
 STATIC rt_event_t _hal_spi_event;
+
+//ADX35采集启动事件，由gps_driver触发
+#define _ADX355_START_EVENT               1<<0
+rt_event_t adx355_start_event;
 
 #define DMA_RX_TX_BUFFER_SIZE 128
 STATIC uint8_t *dma_rx_buffer;
@@ -40,10 +45,13 @@ STATIC SPI_DMA_WRITE_CALLBACK write_reg_cb=NULL;
  */
 #define ADX355_DATA_SIZE_EACH   9
 #define ADX355_SAMPRATE         200
-#define ADX355_RECORD_SECOND    20
+#define ADX355_RECORD_SECOND    60
 #define ADX355_DATA_MQ_BUFFER   2*ADX355_RECORD_SECOND*ADX355_SAMPRATE*ADX355_DATA_SIZE_EACH// 数据缓冲区大小 2分钟
 STATIC uint8_t* adx355_data_buffer;//传感器数据缓冲区
-STATIC uint32_t adx355_data_buffer_counter=0;
+uint32_t adx355_data_buffer_counter=0;
+uint64_t adx355_data_total=0;
+
+extern TIM_HandleTypeDef htim1;
 
 /* HAL SPI DMA 回调 */
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
@@ -258,17 +266,24 @@ failed:
  * @brief 此中断中启动一次DMA SPI传输
  *
  */
+#include "stdbool.h"
 static void read_adx355_data_cb(uint8_t *buffer, uint8_t size, void *user_data){
+    bool need_record = false;
     // 这里使用关中断的方式实现 锁机制
     register rt_base_t temp;
     temp = rt_hw_interrupt_disable();
 
     rt_memcpy(&adx355_data_buffer[adx355_data_buffer_counter], buffer, size);
     adx355_data_buffer_counter+=size;
-    rt_hw_interrupt_enable(temp); 
+    adx355_data_total++;
     if(adx355_data_buffer_counter % (ADX355_RECORD_SECOND*ADX355_SAMPRATE*ADX355_DATA_SIZE_EACH) == 0)
+        need_record = true;
+    rt_hw_interrupt_enable(temp); 
+    if(need_record)
         rt_event_send(adx355_data_enough, _ADX355_DATA_ENOUGH);
 }
+
+#include "gps_driver.h"
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     // 硬件连接 ADX355: DRDY --- PG12
@@ -276,6 +291,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         __NOP();
         //启动SPI DMA传输
         read_reg_async(0x08, 9, read_adx355_data_cb, NULL);
+    }else if(GPIO_Pin == GPIO_PIN_1){
+        gps_driver_EXTI_handle();
     }
 }
 
@@ -345,9 +362,44 @@ static int write_file_one_channel(char *filename, char* timestr, char *channel, 
         return 0;
 }
 
+STATIC int _utils_struct_tm_2_string(struct tm t, char *buf, size_t size){
+    if(size < 20){
+        rt_kprintf("_utils_struct_tm_2_string size:[%d] error, can not less than 20\n");
+        return -1;
+    }
+    int ret = snprintf(buf, size, "%04d-%02d-%02dT%02d:%02d:%02d", 
+                    t.tm_year+1900, t.tm_mon+1, t.tm_mday,
+                    t.tm_hour+8, t.tm_min, t.tm_sec);
+    if(ret==0){
+        rt_kprintf("_utils_struct_tm_2_string snprintf error, expect:[%d], but:[%d]\n", size, ret);
+        return -1;
+    }
+    return 0;
+}
+
+STATIC time_t _utils_struct_tm_2_time_t(struct tm t){
+    return mktime(&t);
+}
+
+STATIC int time_t_2_string(time_t t, char *buf, size_t size, char *format){
+    if(size < 20){
+        rt_kprintf("time_t_2_string size:[%d] error, can not less than 20\n");
+        return -1;
+    }
+    struct tm *temp=NULL;
+    temp = localtime(&t);
+
+    int ret = strftime(buf, size, format, 
+                    temp);
+    if(ret==0){
+        rt_kprintf("time_t_2_string snprintf error, expect:[%d], but:[%d]\n", size, ret);
+        return -1;
+    }
+    return 0;
+}
+
 void adx355_driver_data_record_thread_entry(void *parameter){
     FRESULT f_ret;
-    FIL fil;
     FATFS *fs;
     fs = rt_malloc(sizeof (FATFS));
     f_ret = f_mount(fs, "1:/", 1);
@@ -355,20 +407,105 @@ void adx355_driver_data_record_thread_entry(void *parameter){
         rt_kprintf("adx355_driver_data_record_thread_entry f_mount failed, error code is %d\r\n", f_ret);
     }
 
-    f_ret = f_open(&fil, "1:/test.txt", FA_CREATE_ALWAYS | FA_WRITE);
-    if(f_ret != FR_OK){
-        rt_kprintf("adx355_driver_data_record_thread_entry f_open failed, error code is %d\r\n", f_ret);
-    }
-    UINT bw = 0;
-    f_ret = f_write(&fil, "test", 5, &bw);
-    if(f_ret != FR_OK){
-        rt_kprintf("f_write failed, error code is %d\r\n", f_ret);
-    }
-    if(bw != 5){
-        rt_kprintf("bw != data_size_each, bw is %d\r\n", bw);
+    dma_rx_buffer = rt_malloc(DMA_RX_TX_BUFFER_SIZE);
+    dma_tx_buffer = rt_malloc(DMA_RX_TX_BUFFER_SIZE);
+    if(dma_rx_buffer == NULL || dma_tx_buffer == NULL){
+        rt_kprintf("dma_rx_buffer dma_tx_buffer malloc failed!");
     }
 
-    f_close(&fil);
+    rt_kprintf("starting init adx355...\n");
+    /*
+    * 读取4个ID，验证芯片基本信息
+        1. ADI ID 正确值为 0xAD
+        2. ADI MEMS ID 正确值为 0x1D
+        3. 器件ID 正确值为 0xED
+        4. 产品ID 正确值为 0x01
+    */
+    rt_kprintf("read IDs...\n");
+    uint8_t IDs[4];
+    int ret = read_reg_sync(0, 4, IDs);
+    if(ret<0){
+        rt_kprintf("read_reg failed, error code is[%d]\n",ret);
+    }else{
+        for(int i=0;i<4;i++){
+        rt_kprintf("id[%d]:[%x]\n", i, IDs[i]);
+        }
+    }
+    rt_kprintf("\n\n");
+
+    rt_kprintf("reset adxl355\n");
+    uint8_t RESET = 0x52;
+    ret = write_reg_sync(0x2F, 1, &RESET);
+    if(ret < 0){
+        rt_kprintf("write_reg_sync RESET failed, error code is[%d]\n", ret);
+    }
+
+    rt_thread_mdelay(100);
+
+    rt_kprintf("prepare to set Sync:EXT_SYNC to 10\n");
+    uint8_t EXT_SYNC;
+    ret = read_reg_sync(0x2b, 1, &EXT_SYNC);
+    if(ret < 0){
+        rt_kprintf("write_reg_sync EXT_SYNC failed, error code is[%d]\n", ret);
+    }
+    rt_kprintf("Sync:EXT_SYNC now is:[%d]\n",EXT_SYNC);
+    rt_kprintf("writing reg...\n");
+    CLEAR_BIT(EXT_SYNC, 1<<0);
+    SET_BIT(EXT_SYNC, 1<<1);
+    ret = write_reg_sync(0x2b, 1, &EXT_SYNC);
+    if(ret < 0){
+        rt_kprintf("write_reg_sync EXT_SYNC failed, error code is[%d]\n", ret);
+    }
+    rt_kprintf("write ok\n");
+    ret = read_reg_sync(0x2b, 1, &EXT_SYNC);
+    if(ret < 0){
+        rt_kprintf("write_reg_sync EXT_SYNC failed, error code is[%d]\n", ret);
+    }
+    rt_kprintf("Sync:EXT_SYNC now is:[%d]\n",EXT_SYNC);
+    rt_kprintf("\n\n");
+    rt_kprintf("prepare to set POWER_CTL:STANDBY to 0\n");
+    uint8_t STANDBY;
+    ret = read_reg_sync(0x2d, 1, &STANDBY);
+    if(ret < 0){
+        rt_kprintf("write_reg_sync POWER_CTL failed, error code is[%d]\n", ret);
+    }
+    rt_kprintf("POWER_CTL:STANDBY now is:[%d]\n",STANDBY);
+    rt_kprintf("writing reg...\n");
+    CLEAR_BIT(STANDBY, 1<<0);
+    ret = write_reg_sync(0x2d, 1, &STANDBY);
+    if(ret < 0){
+        rt_kprintf("write_reg_sync POWER_CTL failed, error code is[%d]\n", ret);
+    }
+    rt_kprintf("write ok\n");
+    ret = read_reg_sync(0x2d, 1, &STANDBY);
+    if(ret < 0){
+        rt_kprintf("write_reg_sync POWER_CTL failed, error code is[%d]\n", ret);
+    }
+    rt_kprintf("POWER_CTL:STANDBY now is:[%d]\n",STANDBY);
+
+    rt_thread_mdelay(1000);
+
+    //等待gps ready
+    rt_uint32_t e;
+    rt_event_recv(adx355_start_event, _ADX355_START_EVENT, RT_EVENT_FLAG_OR|RT_EVENT_FLAG_CLEAR,
+                    RT_WAITING_FOREVER, &e);
+    UNUSED(e);
+
+    //开始采集数据
+    HAL_TIM_Base_Start_IT(&htim1);
+    rt_kprintf("gps ready， start sample...\r\n");
+    struct tm gps_ready_time = get_gps_time();
+    char gps_ready_time_str[32] = {0};
+    time_t gps_ready_timestamp = _utils_struct_tm_2_time_t(gps_ready_time);
+    ret = _utils_struct_tm_2_string(gps_ready_time,gps_ready_time_str, sizeof(gps_ready_time_str));
+    if(ret < 0){
+        rt_kprintf("gps get ready time failed!\n");
+    }else{
+        rt_kprintf("gps ready time: %s\n, timestamp:[%ld]\n", gps_ready_time_str,gps_ready_timestamp);
+    }
+    time_t now_timestamp = gps_ready_timestamp;
+    uint32_t *buffer = rt_malloc(ADX355_RECORD_SECOND*ADX355_SAMPRATE*sizeof(uint32_t));
+
     while(1){
         rt_uint32_t e;
         rt_err_t rt_ret;
@@ -377,8 +514,26 @@ void adx355_driver_data_record_thread_entry(void *parameter){
             rt_kprintf("adx355_driver_data_record_thread_entry rt_event_recv failed! error code is:[%d]\n", rt_ret);
         }
         UNUSED(e);
+
+        /* 计算时间和文件名 */
+        now_timestamp = now_timestamp + ADX355_RECORD_SECOND;
+        char now_filename[32] = {0};
+        //1:/20220125T152300.mseed
+        int ret = time_t_2_string(now_timestamp-ADX355_RECORD_SECOND, now_filename, sizeof(now_filename),"1:/%Y%m%dT%H%M%S.mseed");
+        if(ret<0){
+            rt_kprintf("adx355_driver_data_record_thread_entry time_t_2_string failed,error code is:[%d]\n",ret);
+            continue;
+        }
+        char now_timestr[32] = {0};
+        //2022-01-25T15:23:00
+        ret = time_t_2_string(now_timestamp-ADX355_RECORD_SECOND, now_timestr, sizeof(now_timestr),"%Y-%m-%dT%H:%M:%S");
+        if(ret<0){
+            rt_kprintf("adx355_driver_data_record_thread_entry time_t_2_string failed,error code is:[%d]\n",ret);
+            continue;
+        }
+
+        rt_kprintf("ready to write mseed:[%s], starttime:[%s]\n", now_filename, now_timestr);
         
-        uint32_t *buffer = rt_malloc(ADX355_RECORD_SECOND*ADX355_SAMPRATE*sizeof(uint32_t));
         rt_memset(buffer, 0, ADX355_RECORD_SECOND*ADX355_SAMPRATE*sizeof(uint32_t));
         uint32_t buffer_counter=0;
         if(buffer == NULL){
@@ -394,7 +549,7 @@ void adx355_driver_data_record_thread_entry(void *parameter){
             buffer_counter++;
             i+=ADX355_DATA_SIZE_EACH;
         }
-        write_file_one_channel("1:/20220124T140800.mseed", "2022-01-24T14:08:00", "EW", buffer, buffer_counter);
+        write_file_one_channel(now_filename, now_timestr, "EW", buffer, buffer_counter);
         buffer_counter=0;
 
         for(int i=3;i<ADX355_RECORD_SECOND*ADX355_SAMPRATE*ADX355_DATA_SIZE_EACH;){
@@ -406,7 +561,7 @@ void adx355_driver_data_record_thread_entry(void *parameter){
             i+=ADX355_DATA_SIZE_EACH;
         }
 
-        write_file_one_channel("1:/20220124T140800.mseed", "2022-01-24T14:08:00", "NS", buffer, buffer_counter);
+        write_file_one_channel(now_filename, now_timestr, "NS", buffer, buffer_counter);
         buffer_counter=0;
 
         for(int i=6;i<ADX355_RECORD_SECOND*ADX355_SAMPRATE*ADX355_DATA_SIZE_EACH;){
@@ -417,7 +572,7 @@ void adx355_driver_data_record_thread_entry(void *parameter){
             buffer_counter++;
             i+=ADX355_DATA_SIZE_EACH;
         }
-        write_file_one_channel("1:/20220124T140800.mseed", "2022-01-24T14:08:00", "UD", buffer, buffer_counter);
+        write_file_one_channel(now_filename, now_timestr, "UD", buffer, buffer_counter);
         buffer_counter=0;
 
 
@@ -439,7 +594,11 @@ void adx355_driver_data_record_thread_entry(void *parameter){
         register rt_base_t temp;
         temp = rt_hw_interrupt_disable();
 
-        adx355_data_buffer_counter = 0;
+        //前一分钟数据已经保存完毕，所有数据前移
+        memcpy(adx355_data_buffer, adx355_data_buffer+ADX355_RECORD_SECOND*ADX355_SAMPRATE*ADX355_DATA_SIZE_EACH, 
+                adx355_data_buffer_counter-ADX355_RECORD_SECOND*ADX355_SAMPRATE*ADX355_DATA_SIZE_EACH);
+
+        adx355_data_buffer_counter -=ADX355_RECORD_SECOND*ADX355_SAMPRATE*ADX355_DATA_SIZE_EACH;
 
         rt_hw_interrupt_enable(temp); 
     }
@@ -454,16 +613,15 @@ int adx355_driver_init(){
         return -1;
     }
 
-    adx355_data_enough = rt_event_create("adx355_data_enough", RT_IPC_FLAG_PRIO);
-    if(adx355_data_enough == NULL) {
-        rt_kprintf("adx355_data_enough create failed!\n");
+    adx355_start_event = rt_event_create("adx355_start_event", RT_IPC_FLAG_PRIO);
+    if(adx355_start_event == NULL) {
+        rt_kprintf("adx355_start_event create failed!\n");
         return -1;
     }
 
-    dma_rx_buffer = rt_malloc(DMA_RX_TX_BUFFER_SIZE);
-    dma_tx_buffer = rt_malloc(DMA_RX_TX_BUFFER_SIZE);
-    if(dma_rx_buffer == NULL || dma_tx_buffer == NULL){
-        rt_kprintf("dma_rx_buffer dma_tx_buffer malloc failed!");
+    adx355_data_enough = rt_event_create("adx355_data_enough", RT_IPC_FLAG_PRIO);
+    if(adx355_data_enough == NULL) {
+        rt_kprintf("adx355_data_enough create failed!\n");
         return -1;
     }
 

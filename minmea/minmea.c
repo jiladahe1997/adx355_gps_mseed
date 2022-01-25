@@ -79,10 +79,6 @@ bool minmea_check(const char *sentence, bool strict)
     }
 
     // The only stuff allowed at this point is a newline.
-    int test = strcmp(sentence, "\r\n");
-    if(test){
-        int a=0;
-    }
     if (*sentence && strcmp(sentence, "\n") && strcmp(sentence, "\r\n"))
         return false;
 
