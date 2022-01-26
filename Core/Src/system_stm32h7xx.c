@@ -139,6 +139,9 @@
   */
 void SystemInit (void)
 {
+  for(int i=0;i<65534;i++){
+    for(int j=0;j<100;j++);
+  }
 #if defined (DATA_IN_D2_SRAM)
  __IO uint32_t tmpreg;
 #endif /* DATA_IN_D2_SRAM */
